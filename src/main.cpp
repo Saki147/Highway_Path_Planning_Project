@@ -9,159 +9,11 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
 #include "spline.h"
+#include "helpers.h"
 using namespace std;
 
 // for convenience
 using json = nlohmann::json;
-
-// For converting back and forth between radians and degrees.
-constexpr double pi() { return M_PI; }
-double deg2rad(double x) { return x * pi() / 180; }
-double rad2deg(double x) { return x * 180 / pi(); }
-
-// Checks if the SocketIO event has JSON data.
-// If there is data the JSON object in string format will be returned,
-// else the empty string "" will be returned.
-string hasData(string s) {
-  auto found_null = s.find("null");
-  auto b1 = s.find_first_of("[");
-  auto b2 = s.find_first_of("}");
-  if (found_null != string::npos) {
-    return "";
-  } else if (b1 != string::npos && b2 != string::npos) {
-    return s.substr(b1, b2 - b1 + 2);
-  }
-  return "";
-}
-
-double distance(double x1, double y1, double x2, double y2)
-{
-	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
-}
-int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-
-	double closestLen = 100000; //large number
-	int closestWaypoint = 0;
-
-	for(int i = 0; i < maps_x.size(); i++)
-	{
-		double map_x = maps_x[i];
-		double map_y = maps_y[i];
-		double dist = distance(x,y,map_x,map_y);
-		if(dist < closestLen)
-		{
-			closestLen = dist;
-			closestWaypoint = i;
-		}
-
-	}
-
-	return closestWaypoint;
-
-}
-
-int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-
-	int closestWaypoint = ClosestWaypoint(x,y,maps_x,maps_y);
-
-	double map_x = maps_x[closestWaypoint];
-	double map_y = maps_y[closestWaypoint];
-
-	double heading = atan2((map_y-y),(map_x-x));
-
-	double angle = fabs(theta-heading);
-  angle = min(2*pi() - angle, angle);
-
-  if(angle > pi()/4)
-  {
-    closestWaypoint++;
-  if (closestWaypoint == maps_x.size())
-  {
-    closestWaypoint = 0;
-  }
-  }
-
-  return closestWaypoint;
-}
-
-// Transform from Cartesian x,y coordinates to Frenet s,d coordinates
-vector<double> getFrenet(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-	int next_wp = NextWaypoint(x,y, theta, maps_x,maps_y);
-
-	int prev_wp;
-	prev_wp = next_wp-1;
-	if(next_wp == 0)
-	{
-		prev_wp  = maps_x.size()-1;
-	}
-
-	double n_x = maps_x[next_wp]-maps_x[prev_wp];
-	double n_y = maps_y[next_wp]-maps_y[prev_wp];
-	double x_x = x - maps_x[prev_wp];
-	double x_y = y - maps_y[prev_wp];
-
-	// find the projection of x onto n
-	double proj_norm = (x_x*n_x+x_y*n_y)/(n_x*n_x+n_y*n_y);
-	double proj_x = proj_norm*n_x;
-	double proj_y = proj_norm*n_y;
-
-	double frenet_d = distance(x_x,x_y,proj_x,proj_y);
-
-	//see if d value is positive or negative by comparing it to a center point
-
-	double center_x = 1000-maps_x[prev_wp];
-	double center_y = 2000-maps_y[prev_wp];
-	double centerToPos = distance(center_x,center_y,x_x,x_y);
-	double centerToRef = distance(center_x,center_y,proj_x,proj_y);
-
-	if(centerToPos <= centerToRef)
-	{
-		frenet_d *= -1;
-	}
-
-	// calculate s value
-	double frenet_s = 0;
-	for(int i = 0; i < prev_wp; i++)
-	{
-		frenet_s += distance(maps_x[i],maps_y[i],maps_x[i+1],maps_y[i+1]);
-	}
-
-	frenet_s += distance(0,0,proj_x,proj_y);
-
-	return {frenet_s,frenet_d};
-
-}
-
-// Transform from Frenet s,d coordinates to Cartesian x,y
-vector<double> getXY(double s, double d, const vector<double> &maps_s, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-	int prev_wp = -1;
-
-	while(s > maps_s[prev_wp+1] && (prev_wp < (int)(maps_s.size()-1) ))
-	{
-		prev_wp++;
-	}
-
-	int wp2 = (prev_wp+1)%maps_x.size();
-
-	double heading = atan2((maps_y[wp2]-maps_y[prev_wp]),(maps_x[wp2]-maps_x[prev_wp]));
-	// the x,y,s along the segment
-	double seg_s = (s-maps_s[prev_wp]);
-
-	double seg_x = maps_x[prev_wp]+seg_s*cos(heading);
-	double seg_y = maps_y[prev_wp]+seg_s*sin(heading);
-
-	double perp_heading = heading-pi()/2;
-
-	double x = seg_x + d*cos(perp_heading);
-	double y = seg_y + d*sin(perp_heading);
-
-	return {x,y};
-
-}
 
 int main() {
   uWS::Hub h;
@@ -200,15 +52,16 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-	//Car's lane. Stating at middle lane.
+  //Car's lane. Stating at middle lane.
   int lane = 1;
 
   //Reference velocity.
-	double ref_vel = 0.0; // mph
-	double speed_diff = .224;
-	const double max_accel = 49.5;
+  double ref_vel = 0; // mph
+  double speed_diff = .224;
+  const double max_vel = 49.5; // mph
 
-  h.onMessage([&max_accel, &speed_diff, &ref_vel, &lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&max_vel, &speed_diff, &ref_vel, &lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
+  &map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -221,12 +74,12 @@ int main() {
 
       if (s != "") {
         auto j = json::parse(s);
-        
+
         string event = j[0].get<string>();
-        
+
         if (event == "telemetry") {
           // j[1] is the data JSON object
-          
+
         	// Main car's localization Data
           	double car_x = j[1]["x"];
           	double car_y = j[1]["y"];
@@ -238,118 +91,149 @@ int main() {
           	// Previous path data given to the Planner
           	auto previous_path_x = j[1]["previous_path_x"];
           	auto previous_path_y = j[1]["previous_path_y"];
-          	// Previous path's end s and d values 
+          	// Previous path's end s and d values
           	double end_path_s = j[1]["end_path_s"];
           	double end_path_d = j[1]["end_path_d"];
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
+          	// the data format is [id, x, y, vx, vy, s, d].
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
-						int prev_size = previous_path_x.size();
+            int prev_size = previous_path_x.size();
 
-						//PREDICTION
+            //PREDICTION
 
-						/***
-						The prediction component estimates what actions other objects might take in the future. For example, if another vehicle were identified, the prediction component would estimate its future trajectory.
-						***/
+            /***
+            The prediction component estimates what actions other objects might take in the future. For example, if
+            another vehicle were identified, the prediction component would estimate its future trajectory.
+            ***/
 
-						/*
-							In this example prediction module we use to find out following
-							car ahead is too close, car on the left is too close, and car on the right is too close.
+            /*
+                In this example prediction module we use to find out following
+                car ahead is too close, car on the left is too close, and car on the right is too close.
 
-							As explained actual prediction module will be implementd using the apparoach mentioned above, but this highway project
-							doesnt need to predict the trajectory of each vehicle as those vehicles trajectory will be on the straight lane.
-						*/
+                As explained actual prediction module will be implemented using the approach mentioned above, but this
+                highway project doesnt need to predict the trajectory of each vehicle as those vehicles trajectory will
+                be on the straight lane.
+            */
 
-						if(prev_size > 0) {
-							car_s = end_path_s;
-						}
+            if(prev_size > 0) {
+                car_s = end_path_s;
+            }
 
-						bool car_left= false;
-						bool car_right = false;
-						bool car_ahead = false;
-						for(int i=0; i < sensor_fusion.size(); i++) {
-							
-							float d = sensor_fusion[i][6];
+            bool car_left = false;
+            bool car_right = false;
+            bool car_ahead = false;
+            double check_speed_ahead;
+            double cost_l;
+            double cost_r;
+            double max_cost_l = 0;
+            double max_cost_r = 0;
+            double diff_car_s;
+            double min_car_diffs = 100;
 
-							int check_car_lane;
+            for(int i=0; i < sensor_fusion.size(); i++) {
 
-							/*Currently we assume that we have only three lanes and each lane has 4 meter width. In actual scenarion, 
-							number of lanes an ddistance between the lanes and total lanes distance can be detected using computer vision 
-							technologies. We slightly touched in advanced lane findings in term1. 
-							*/
-							if(d > 0 && d < 4) {
-								check_car_lane = 0;
-							} else if(d > 4 && d < 8) {
-								check_car_lane = 1;
-							} else if(d > 8 and d < 12) {
-								check_car_lane = 2;
-							} 	
-							
-							double vx = sensor_fusion[i][3];
-							double vy = sensor_fusion[i][4];
-							double check_speed = sqrt(vx*vx+vy*vy);
-							double check_car_s = sensor_fusion[i][5];	
+                // the d of the i_th detected car
+                float d = sensor_fusion[i][6];
 
-							//This will help to predict the where the vehicle will be in future
-							check_car_s += ((double)prev_size*0.02*check_speed);
-							if(check_car_lane == lane) {
-								//A vehicle is on the same line and check the car is in front of the ego car
-								car_ahead |= check_car_s > car_s && (check_car_s - car_s) < 30;										
+                int check_car_lane;
 
-							} else if((check_car_lane - lane) == -1) {
-								//A vehicle is on the left lane and check that is in 30 meter range
-								car_left |= (car_s+30) > check_car_s  && (car_s-30) < check_car_s;
+                /*Currently we assume that we have only three lanes and each lane has 4 meter width. In actual scenario,
+                number of lanes an d distance between the lanes and total lanes distance can be detected using computer
+                vision technologies. We slightly touched in advanced lane findings in term1.
+                */
+                if(d > 0 && d < 4) {
+                    check_car_lane = 0;
+                } else if(d > 4 && d < 8) {
+                    check_car_lane = 1;
+                } else if(d > 8 and d < 12) {
+                    check_car_lane = 2;
+                }
 
-							} else if((check_car_lane - lane) == 1) {
-								//A vehicle is on the right lane and check that is in 30 meter range
-								car_right |= (car_s+30) > check_car_s  && (car_s-30) < check_car_s;
-							
-							}
-						}
+                double vx = sensor_fusion[i][3];
+                double vy = sensor_fusion[i][4];
+                double check_speed = sqrt(vx*vx+vy*vy); // the speed of the car detected
+                double check_car_s = sensor_fusion[i][5]; // the s of the car detected
 
-						//As we said, actual prediction module gives the possible trajectories from the current timeline to the future of each vehicle. 
-						//In this highway exmaple, we will have only one possible trajectory for each vehicle and that is why we are using simple approach as above.
-						//In complex situation we may need to use model, data, or hybrid approach for prdiction module
-						
-						//BEHAVIOUR
-						/***
-						The behavioral planning component determines what behavior the vehicle should exhibit at any point in time. 
-						For example stopping at a traffic light or intersection, changing lanes, accelerating, or making a left turn onto a new street are all maneuvers that may be issued by this component.
-						***/
-						if(car_ahead) {
-							if(!car_left && lane > 0) {
-								lane--;
-							} else if(!car_right && lane !=2) {
-								lane++;
-							} else if(!car_left && lane !=2) {
-								lane++;
-							}else {
-								ref_vel -= speed_diff;
-							}
-						} else if(ref_vel < max_accel){
-							ref_vel += speed_diff;
-						}
-						//In actual case, behaviour planner decides the trajectory based on the cost functions.
-						//In this highway example, we may no need to worry about cost functions as we are considering only lane change or reduce speed based on the obstacles. 
+              //This will help to predict where the vehicle will be in future, project s value out in time
+                check_car_s += ((double)prev_size*0.02*check_speed);
+                if(check_car_lane == lane) {
+                    //A vehicle is on the same lane and check the car is in front of the ego car
+                    diff_car_s = check_car_s - car_s;
+                    car_ahead |= diff_car_s > 0 && diff_car_s < 30;
+                    if (car_ahead && diff_car_s < min_car_diffs ){
+                        min_car_diffs = diff_car_s;
+                        check_speed_ahead = check_speed;
+                    }
 
-						//TRAJECTORY
-						/***
-						Based on the desired immediate behavior, the trajectory planning component will determine which trajectory is best for executing this behavior.
-						***/
-						vector<double> ptsx;
+                } else if((check_car_lane - lane) == -1) {
+                    //A vehicle is on the left lane and check that is in 30 meter range
+                    diff_car_s = fabs(car_s - check_car_s);
+                    car_left |= diff_car_s < 20;
+                    cost_l = 1/ (1+ exp(diff_car_s*diff_car_s)); //cost of change to the left lane
+                    if (max_cost_l < cost_l){
+                        max_cost_l = cost_l; //record the max cost for left lane change
+                    }
+
+                } else if((check_car_lane - lane) == 1) {
+                    //A vehicle is on the right lane and check that is in 30 meter range
+                    diff_car_s = fabs(car_s - check_car_s);
+                    car_right |= diff_car_s < 20;
+                    cost_r = 1/ (1+ exp(diff_car_s*diff_car_s)); //cost of change to the right lane
+                    if (max_cost_r < cost_r){
+                        max_cost_r = cost_r; //record the max cost for left lane change
+                    }
+                }
+            }
+
+            //As we said, actual prediction module gives the possible trajectories from the current timeline to the future of each vehicle.
+            //In this highway example, we will have only one possible trajectory for each vehicle and that is why we are
+            //using simple approach as above.
+            //In complex situation we may need to use model, data, or hybrid approach for prediction module
+
+            //BEHAVIOUR
+            /***
+            The behavioral planning component determines what behavior the vehicle should exhibit at any point in time.
+            For example stopping at a traffic light or intersection, changing lanes, accelerating, or making a left turn onto a new street are all maneuvers that may be issued by this component.
+            ***/
+            if(car_ahead) {
+                if(!car_left && lane > 0 ) {
+                  if (lane == 2| max_cost_l <= max_cost_r){
+                    lane--;
+                  }
+                } else if(!car_right && lane !=2 ) {
+                    lane++;
+                }else {
+                    if (ref_vel > check_speed_ahead ){
+                        ref_vel -= speed_diff; //reduce the car speed by speed_diff if it's faster than the car ahead
+                    } else{
+                        ref_vel = check_speed_ahead; //follow the front car with the same speed
+                    }
+                }
+            } else if(ref_vel < max_vel ){
+                ref_vel += speed_diff; //add the speed when there's no car ahead and the speed is under the limit
+            }
+            //In actual case, behaviour planner decides the trajectory based on the cost functions.
+            //In this highway example, we may no need to worry about cost functions as we are considering only lane change or reduce speed based on the obstacles.
+
+            //TRAJECTORY
+            /***
+            Based on the desired immediate behavior, the trajectory planning component will determine which trajectory is best for executing this behavior.
+            ***/
+            vector<double> ptsx;
             vector<double> ptsy;
 
-						//Refrence x,y, and yaw states
+            //Refrence x,y, and yaw states
             double ref_x = car_x;
             double ref_y = car_y;
-						double ref_yaw = deg2rad(car_yaw);
+            double ref_yaw = deg2rad(car_yaw);
 
-						// If previous states are almost empty, use the car as a startting point
+            // If previous states are almost empty, use the car as a starting point
             if ( prev_size < 2 ) {
 
-                //Use two points thats makes path tangent to the car
-								double prev_car_x = car_x - cos(car_yaw);
+                //Use two points that makes path tangent to the car
+                double prev_car_x = car_x - cos(car_yaw);
                 double prev_car_y = car_y - sin(car_yaw);
 
                 ptsx.push_back(prev_car_x);
@@ -357,10 +241,9 @@ int main() {
 
                 ptsy.push_back(prev_car_y);
                 ptsy.push_back(car_y);
-            
-						} else {
 
-								//Redefine the reference point to previous point
+            } else {
+                //Redefine the reference point to previous point
                 ref_x = previous_path_x[prev_size - 1];
                 ref_y = previous_path_y[prev_size - 1];
 
@@ -373,9 +256,10 @@ int main() {
 
                 ptsy.push_back(ref_y_prev);
                 ptsy.push_back(ref_y);
-						}
+            }
 
-						// Setting up target points in the future.
+            // Setting up target points in the future.
+            // the car is at its lane center
             vector<double> next_wp0 = getXY(car_s + 30, 2 + 4*lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
             vector<double> next_wp1 = getXY(car_s + 60, 2 + 4*lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
             vector<double> next_wp2 = getXY(car_s + 90, 2 + 4*lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
@@ -388,62 +272,66 @@ int main() {
             ptsy.push_back(next_wp1[1]);
             ptsy.push_back(next_wp2[1]);
 
-            // Making coordinates to local car coordinates.
+            // Making coordinates to local car coordinates, so that the angle between the car's direction and the new
+            //y coordinate is 0.
             for ( int i = 0; i < ptsx.size(); i++ ) {
               double shift_x = ptsx[i] - ref_x;
               double shift_y = ptsy[i] - ref_y;
 
-              ptsx[i] = shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw);
-              ptsy[i] = shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw);
-						}
+              //for the car's coordinates
+              ptsx[i] = shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw); //car's heading direction
+              ptsy[i] = shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw); //car's perpendicular direction
+            }
 
-						// Create the spline.
+            // Create the spline.
             tk::spline s;
             s.set_points(ptsx, ptsy);
 
-						vector<double> next_x_vals;
+            // TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+
+            vector<double> next_x_vals;
           	vector<double> next_y_vals;
-            
-						//For the smooth transition, we are adding previous path points
-						for ( int i = 0; i < prev_size; i++ ) {
+
+            //For the smooth transition, we are adding previous path points
+            for ( int i = 0; i < prev_size; i++ ) {
               next_x_vals.push_back(previous_path_x[i]);
               next_y_vals.push_back(previous_path_y[i]);
             }
-						
-						// Calculate distance y position on 30 m ahead.
+
+            // Calculate distance y position on 30 m ahead.
             double target_x = 30.0;
             double target_y = s(target_x);
             double target_dist = sqrt(target_x*target_x + target_y*target_y);
 
             double x_add_on = 0;
 
+            // Fill up the rest of our path planner after filling it with the previous points, here always output  50
+            //points.
             for( int i = 1; i < 50 - prev_size; i++ ) {
-              
-              double N = target_dist/(0.02*ref_vel/2.24);
-              double x_point = x_add_on + target_x/N;
-              double y_point = s(x_point);
 
-              x_add_on = x_point;
+              double N = target_dist/(0.02*ref_vel/2.24); // N = the number of points, (1m/s = 2.24 MPH)
+              double x_point = x_add_on + target_x/N; // x coordinate for point i
+              double y_point = s(x_point); // y coordinate for point i
 
-              double x_ref = x_point;
-              double y_ref = y_point;
+              x_add_on = x_point; // new x coordinate
 
-							//Rotate back to normal after rotating it earlier
-              x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
-              y_point = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw);
+              double x_ref = x_point; // record the x local coordinate as x_ref
+              double y_ref = y_point; // record the y local coordinate as y_ref
 
-              x_point += ref_x;
-              y_point += ref_y;
+              //Rotate back to normal after rotating it earlier
+              x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw); //rotate the coordinate
+              y_point = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw); //rotate the coordinate
+
+              x_point += ref_x; // shift the x coordinate to the global coordinate
+              y_point += ref_y; // shift the y coordinate to the global coordinate
 
               next_x_vals.push_back(x_point);
               next_y_vals.push_back(y_point);
-						}
+            }
 
 
           	json msgJson;
 
-
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 
@@ -451,7 +339,7 @@ int main() {
 
           	//this_thread::sleep_for(chrono::milliseconds(1000));
           	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-          
+
         }
       } else {
         // Manual driving
